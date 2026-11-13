@@ -1,0 +1,29 @@
+# --- PowerShell & Scripting Temporary Files ---
+*.log
+*.tmp
+*.bak
+*.reg
+transcript/
+*.pssc
+
+# --- User & Machine Specific Data ---
+credentials/
+secrets/
+*.env
+*.json
+!config.json.example
+
+# --- OS Specific Files ---
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# --- IDE & Editor Settings (VS Code / Claude / Cursor) ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
