@@ -1,29 +1,3 @@
-<#
-.SYNOPSIS
-    One script for SentinelOne check / install / update: remote (WinRM), local (on the machine itself)
-    and "package" mode (prepares a folder you send via TeamViewer).
-
-.EXAMPLE
-    # REMOTE - from your admin PC (targets from machines.txt, or -ComputerName)
-    .\sentinel-v4.ps1 -CheckOnly
-    .\sentinel-v4.ps1
-    .\sentinel-v4.ps1 -ComputerName TRV-ENG-10 -CheckOnly
-    .\sentinel-v4.ps1 -TryEnableWinRM        # if port 5985 is closed, try to enable WinRM via DCOM (135)
-
-.EXAMPLE
-    # LOCAL - on the machine you are sitting on / connected to via TeamViewer
-    .\sentinel-v4.ps1 -Local -CheckOnly      # report only, no admin / installer / token needed
-    .\sentinel-v4.ps1 -Local                 # install / update (needs admin + package files)
-
-.EXAMPLE
-    # PACKAGE - for machines WinRM cannot reach: builds a folder with installer + this script + token.txt
-    .\sentinel-v4.ps1 -MakePackage TRV
-
-.NOTES
-    Target version comes from the installer file name (..._v25_2_6_442.exe -> 25.2.6.442).
-    Site paths + tokens live in sentinel_sites.json (needed for remote mode and -MakePackage).
-    Run with:  powershell -ExecutionPolicy Bypass -File .\sentinel-v4.ps1 <options>
-#>
 [CmdletBinding()]
 param(
     [switch]$Local,
@@ -33,8 +7,7 @@ param(
     [switch]$CheckOnly,
     [switch]$TryEnableWinRM,
     [switch]$Yes,
-   # [string]$InstallerName = "SentinelOneInstaller_windows_64bit_v25_2_6_442.exe",
-    [string]$InstallerName = "SentinelOneInstaller_windows_64bit_v25_2_6_442.exe",
+    [string]$InstallerName = 'SentinelOneInstaller_windows_64bit_v25_2_6_442.exe',
     [string]$MachinesFile  = "$HOME\Documents\machines.txt",
     [string]$ConfigFile    = "$HOME\Documents\sentinel_sites.json",
     [string]$CredFile      = "$HOME\Documents\admin_cred.xml",
@@ -42,25 +15,8 @@ param(
     [int]$StaleDays        = 30
 )
 
-# ---------------------------------------------------------------- setup
-$root = if ($PSScriptRoot) { $PSScriptRoot }
-        elseif ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path }
-        else { (Get-Location).Path }
-$selfPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+$ErrorActionPreference = 'Stop'
 
-if ($InstallerName -match 'v(\d+)_(\d+)_(\d+)_(\d+)') {
-    $TargetVersion = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3]).$($Matches[4])"
-} else {
-    throw "Cannot derive target version from installer name '$InstallerName'."
-}
-if ($Local -and $ComputerName) { throw '-Local and -ComputerName cannot be combined.' }
-
-$script:Config = $null
-if (Test-Path -LiteralPath $ConfigFile) { $script:Config = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json }
-$script:HaveAD = [bool](Get-Command Get-ADComputer -ErrorAction SilentlyContinue)
-$script:Good   = 'OK', 'OK_NEWER', 'UPGRADED', 'INSTALLED', 'SERVICE_STARTED'
-
-# ---------------------------------------------------------------- helpers
 function Write-Step {
     param([string]$Text, [string]$Color = 'Gray')
     Write-Host "  $Text" -ForegroundColor $Color
@@ -84,7 +40,6 @@ function New-FailResult {
     New-Result $Computer $Status $Reason $IP $Version
 }
 
-# Runs a script block on the target: through the WinRM session, or right here when there is no session
 function Invoke-OnTarget {
     param($Session, [scriptblock]$Block, [object[]]$ArgList = @())
     if ($Session) { Invoke-Command -Session $Session -ScriptBlock $Block -ArgumentList $ArgList }
@@ -132,10 +87,9 @@ function Enable-WinRMViaDcom {
             CommandLine = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Enable-PSRemoting -Force -SkipNetworkProfileCheck"'
         }
         return ($res.ReturnValue -eq 0)
-    } finally { Remove-CimSession $cim }
+    } finally { Remove-CimSession $cim -ErrorAction SilentlyContinue }
 }
 
-# Runs ON the target (remotely or locally)
 $script:StateBlock = {
     $paths = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
              'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
@@ -169,7 +123,6 @@ $script:StateBlock = {
     }
 }
 
-# ---------------------------------------------------------------- core: one machine (remote or local)
 function Invoke-Deploy {
     param(
         [Parameter(Mandatory)][string]$Computer,
@@ -186,7 +139,6 @@ function Invoke-Deploy {
         if ($LocalInfo) { $token = $LocalInfo.Token; $sourceFile = $LocalInfo.InstallerPath }
     }
     else {
-        # --- site (prefix)
         $prefix = $Computer.Substring(0, [Math]::Min(3, $Computer.Length)).ToUpper()
         $site   = $script:Config.$prefix
         if (-not $site) {
@@ -195,7 +147,6 @@ function Invoke-Deploy {
         $token      = $site.Token
         $sourceFile = Join-Path $site.SourcePath $InstallerName
 
-        # --- Active Directory
         if ($script:HaveAD) {
             $ad = $null
             try { $ad = Get-ADComputer -Identity $Computer -Properties LastLogonDate, Enabled -ErrorAction Stop } catch {}
@@ -211,7 +162,6 @@ function Invoke-Deploy {
             }
         }
 
-        # --- DNS
         $ips = @()
         try {
             $ips = @(Resolve-DnsName -Name $Computer -Type A -ErrorAction Stop |
@@ -233,7 +183,6 @@ function Invoke-Deploy {
             }
         }
 
-        # --- network reachability
         $ping  = Test-Connection -ComputerName $Computer -Count 2 -Quiet
         $winrm = Test-TcpPort $Computer 5985
         $smb   = Test-TcpPort $Computer 445
@@ -262,7 +211,6 @@ function Invoke-Deploy {
             }
         }
 
-        # --- WinRM session
         try {
             $session = New-PSSession -ComputerName $Computer -Credential $script:Cred -ErrorAction Stop
         } catch {
@@ -273,7 +221,6 @@ function Invoke-Deploy {
         }
     }
 
-    # ------------------------------------------------ common part (same code for remote and local)
     try {
         $state = Invoke-OnTarget $session $script:StateBlock
         $ver   = $null
@@ -315,7 +262,6 @@ function Invoke-Deploy {
             return New-Result $Computer $st "Service state: $($state.Service)" $ip $state.Version
         }
 
-        # installed + current version, only the service is stopped -> try to start it first
         if ($installed -and -not $needsUpgrade -and -not $serviceUp) {
             Write-Step "Service is '$($state.Service)'. Trying to start it..." Yellow
             $started = Invoke-OnTarget $session {
@@ -333,7 +279,6 @@ function Invoke-Deploy {
             return New-FailResult $Computer 'LOW_DISK' "Only $($state.FreeGB) GB free on C: - not enough for the installer." $ip $state.Version
         }
 
-        # --- get the installer to a place where the target can run it
         if (-not $sourceFile -or -not (Test-Path -LiteralPath $sourceFile)) {
             return New-FailResult $Computer 'INSTALLER_MISSING' "Installer not found / not readable from this PC: $sourceFile (file share down, wrong name, or no permission)." $ip $state.Version
         }
@@ -341,26 +286,23 @@ function Invoke-Deploy {
         if ($IsLocal) {
             $installerOnTarget = $sourceFile
             if (-not $Yes) {
-                $answer = Read-Host "Install/upgrade SentinelOne on $Computer now? Type YES to continue"
-                if ($answer -ne 'YES') {
-                    return New-FailResult $Computer 'CANCELLED' 'Cancelled by operator.' $ip $state.Version
-                }
+                return New-FailResult $Computer 'CANCELLED' 'Local run needs -Yes (silent mode, no prompt).' $ip $state.Version
             }
         }
         else {
             $installerOnTarget = "C:\Temp\$InstallerName"
             Invoke-OnTarget $session {
-                if (-not (Test-Path 'C:\Temp')) { New-Item -ItemType Directory -Path 'C:\Temp' | Out-Null }
+                if (-not (Test-Path 'C:\Temp')) { New-Item -ItemType Directory -Path 'C:\Temp' -Force -Confirm:$false | Out-Null }
             } | Out-Null
             Write-Step 'Copying installer...' Cyan
             $copied = $false; $copyErrors = @()
             try {
-                Copy-Item -LiteralPath $sourceFile -Destination "\\$Computer\C$\Temp\$InstallerName" -Force -ErrorAction Stop
+                Copy-Item -LiteralPath $sourceFile -Destination "\\$Computer\C$\Temp\$InstallerName" -Force -Confirm:$false -ErrorAction Stop
                 $copied = $true
             } catch { $copyErrors += "admin share: $($_.Exception.Message)" }
             if (-not $copied) {
                 try {
-                    Copy-Item -LiteralPath $sourceFile -Destination $installerOnTarget -ToSession $session -Force -ErrorAction Stop
+                    Copy-Item -LiteralPath $sourceFile -Destination $installerOnTarget -ToSession $session -Force -Confirm:$false -ErrorAction Stop
                     $copied = $true
                 } catch { $copyErrors += "WinRM copy: $($_.Exception.Message)" }
             }
@@ -369,7 +311,6 @@ function Invoke-Deploy {
             }
         }
 
-        # --- silent install / upgrade
         Write-Step 'Running silent install/upgrade...' Cyan
         $exit = Invoke-OnTarget $session {
             param($file, $tok)
@@ -384,12 +325,11 @@ function Invoke-Deploy {
         }
         if ($exit -eq 3010) { Write-Step 'Installer reports that a reboot is required (3010).' Yellow }
 
-        # --- verify
         Write-Step 'Waiting 20 s and verifying...' Cyan
         Start-Sleep -Seconds 20
         $after = Invoke-OnTarget $session $script:StateBlock
         if (-not $IsLocal) {
-            Invoke-OnTarget $session { param($f) Remove-Item $f -Force -ErrorAction SilentlyContinue } @($installerOnTarget) | Out-Null
+            Invoke-OnTarget $session { param($f) Remove-Item $f -Force -Confirm:$false -ErrorAction SilentlyContinue } @($installerOnTarget) | Out-Null
         }
 
         $afterVer = $null
@@ -409,8 +349,8 @@ function Invoke-Deploy {
     }
 }
 
-# ---------------------------------------------------------------- local mode wrapper
 function Get-LocalSiteInfo {
+    $root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
     $tf = if ($TokenFile) { $TokenFile } else { Join-Path $root 'token.txt' }
     $localInstaller = Join-Path $root $InstallerName
 
@@ -461,19 +401,19 @@ function Invoke-LocalRun {
     }
     finally {
         if (-not $CheckOnly -and $info) {
-            # the token never stays on the machine
-            if ($info.TokenFile -and (Test-Path -LiteralPath $info.TokenFile)) { Remove-Item -LiteralPath $info.TokenFile -Force -ErrorAction SilentlyContinue }
+            if ($info.TokenFile -and (Test-Path -LiteralPath $info.TokenFile)) { Remove-Item -LiteralPath $info.TokenFile -Force -Confirm:$false -ErrorAction SilentlyContinue }
             if ($info.CleanupInstaller -and $res -and ($res.Status -in $script:Good) -and (Test-Path -LiteralPath $info.InstallerPath)) {
-                Remove-Item -LiteralPath $info.InstallerPath -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $info.InstallerPath -Force -Confirm:$false -ErrorAction SilentlyContinue
             }
             Write-Host '  Cleanup done (token file removed; installer removed after success).' -ForegroundColor DarkGray
         }
     }
 }
 
-# ---------------------------------------------------------------- package mode
 function New-InstallPackage {
     if (-not $script:Config) { throw "Site config not found: $ConfigFile" }
+    $root     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    $selfPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
     $prefix = $MakePackage.ToUpper()
     $site   = $script:Config.$prefix
     if (-not $site) { throw "Prefix '$prefix' is not defined in $ConfigFile." }
@@ -481,10 +421,10 @@ function New-InstallPackage {
     if (-not (Test-Path -LiteralPath $src)) { throw "Installer not readable: $src" }
 
     $dir = if ($OutDir) { $OutDir } else { Join-Path $root "S1_package_$prefix" }
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    Copy-Item -LiteralPath $src      -Destination $dir -Force
-    Copy-Item -LiteralPath $selfPath -Destination $dir -Force
-    Set-Content -Path (Join-Path $dir 'token.txt') -Value "$prefix|$($site.Token)" -NoNewline
+    New-Item -ItemType Directory -Path $dir -Force -Confirm:$false | Out-Null
+    Copy-Item -LiteralPath $src      -Destination $dir -Force -Confirm:$false
+    Copy-Item -LiteralPath $selfPath -Destination $dir -Force -Confirm:$false
+    Set-Content -Path (Join-Path $dir 'token.txt') -Value "$prefix|$($site.Token)" -NoNewline -Force -Confirm:$false
 
     $scriptName = Split-Path $selfPath -Leaf
     Write-Host "Package created: $dir" -ForegroundColor Green
@@ -492,50 +432,72 @@ function New-InstallPackage {
     Write-Host ''
     Write-Host '  1) TeamViewer > File transfer: send ALL files from that folder to C:\Temp\S1 on the target.'
     Write-Host '  2) On the target (admin terminal):'
-    Write-Host "       cd C:\Temp\S1"
-    Write-Host "       powershell -ExecutionPolicy Bypass -File .\$scriptName -Local"
+    Write-Host '       cd C:\Temp\S1'
+    Write-Host "       powershell -ExecutionPolicy Bypass -File .\$scriptName -Local -Yes"
     Write-Host '  3) Afterwards delete C:\Temp\S1 on the target AND the package folder on this PC.'
 }
 
-# ---------------------------------------------------------------- dispatch
-if ($MakePackage) { New-InstallPackage; return }
+try {
+    if ($InstallerName -notmatch 'v(\d+)_(\d+)_(\d+)_(\d+)') {
+        throw "Cannot derive target version from installer name '$InstallerName'."
+    }
+    $TargetVersion = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3]).$($Matches[4])"
+    if ($Local -and $ComputerName) { throw '-Local and -ComputerName cannot be combined.' }
 
-Write-Host "Target SentinelOne version: $TargetVersion  (installer: $InstallerName)" -ForegroundColor Cyan
-if ($CheckOnly) { Write-Host 'CHECK-ONLY mode: nothing will be changed.' -ForegroundColor Yellow }
+    $script:Good = 'OK', 'OK_NEWER', 'UPGRADED', 'INSTALLED', 'SERVICE_STARTED'
+    $script:Config = $null
+    if (Test-Path -LiteralPath $ConfigFile) { $script:Config = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json }
+    $script:HaveAD = [bool](Get-Command Get-ADComputer -ErrorAction SilentlyContinue)
 
-if ($Local) {
-    $results = @(Invoke-LocalRun)
-}
-else {
-    if (-not $script:Config) { throw "Site config not found: $ConfigFile" }
-    $script:Cred = Import-Clixml -Path $CredFile
+    if ($MakePackage) {
+        New-InstallPackage
+        Write-Output "SUCCESS: package created for site $($MakePackage.ToUpper())"
+    }
+    else {
+        Write-Host "Target SentinelOne version: $TargetVersion  (installer: $InstallerName)" -ForegroundColor Cyan
+        if ($CheckOnly) { Write-Host 'CHECK-ONLY mode: nothing will be changed.' -ForegroundColor Yellow }
 
-    $computers = if ($ComputerName) { $ComputerName }
-                 else { Get-Content -Path $MachinesFile }
-    $computers = $computers | ForEach-Object { $_.Trim() } |
-                 Where-Object { $_ -and -not $_.StartsWith('#') } | Select-Object -Unique
+        if ($Local) {
+            $results = @(Invoke-LocalRun)
+        }
+        else {
+            if (-not $script:Config) { throw "Site config not found: $ConfigFile" }
+            $script:Cred = Import-Clixml -Path $CredFile
 
-    $results = foreach ($c in $computers) {
-        Write-Host ('-' * 70)
-        Write-Host "Processing: $c" -ForegroundColor Cyan
-        Invoke-Deploy -Computer $c
+            $computers = if ($ComputerName) { $ComputerName }
+                         else { Get-Content -Path $MachinesFile }
+            $computers = $computers | ForEach-Object { $_.Trim() } |
+                         Where-Object { $_ -and -not $_.StartsWith('#') } | Select-Object -Unique
+
+            $results = foreach ($c in $computers) {
+                Write-Host ('-' * 70)
+                Write-Host "Processing: $c" -ForegroundColor Cyan
+                Invoke-Deploy -Computer $c
+            }
+        }
+
+        Write-Host ('=' * 70)
+        $results | Format-Table Computer, IP, Status, Version, Reason -AutoSize -Wrap
+
+        $failed = @($results | Where-Object { $_.Status -notin $script:Good })
+        $summary = "$(@($results).Count) machine(s) processed, $($failed.Count) need attention"
+
+        if (-not $Local) {
+            $stamp  = Get-Date -Format 'yyyyMMdd_HHmm'
+            $report = "$HOME\Documents\sentinel_report_$stamp.csv"
+            $results | Export-Csv -Path $report -NoTypeInformation -Encoding UTF8 -Force -Confirm:$false
+
+            if ($failed.Count -gt 0) {
+                $retry = "$HOME\Documents\machines_retry_$stamp.txt"
+                $failed.Computer | Set-Content -Path $retry -Force -Confirm:$false
+                Write-Host "$($failed.Count) machine(s) need attention. Retry list: $retry" -ForegroundColor Yellow
+            }
+            Write-Host "CSV report: $report" -ForegroundColor Cyan
+            $summary += "; report: $report"
+        }
+        Write-Output "SUCCESS: $summary"
     }
 }
-
-# ---------------------------------------------------------------- summary
-Write-Host ('=' * 70)
-$results | Format-Table Computer, IP, Status, Version, Reason -AutoSize -Wrap
-
-if (-not $Local) {
-    $stamp  = Get-Date -Format 'yyyyMMdd_HHmm'
-    $report = "$HOME\Documents\sentinel_report_$stamp.csv"
-    $results | Export-Csv -Path $report -NoTypeInformation -Encoding UTF8
-
-    $failed = @($results | Where-Object { $_.Status -notin $script:Good })
-    if ($failed.Count -gt 0) {
-        $retry = "$HOME\Documents\machines_retry_$stamp.txt"
-        $failed.Computer | Set-Content -Path $retry
-        Write-Host "$($failed.Count) machine(s) need attention. Retry list: $retry" -ForegroundColor Yellow
-    }
-    Write-Host "CSV report: $report" -ForegroundColor Cyan
+catch {
+    Write-Output "ERROR: $($_.Exception.Message)"
 }

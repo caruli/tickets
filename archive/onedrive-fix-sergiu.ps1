@@ -3,34 +3,30 @@ param(
     [string]$ComputerName
 )
 
-Write-Host "Pripájam sa na vzdialený počítač: $ComputerName" -ForegroundColor Cyan
+try {
+    $cred = Import-Clixml "$HOME\Documents\admin_cred.xml"
 
-Invoke-Command -ComputerName $ComputerName -ScriptBlock {
-    # Close OneDrive
-    Stop-Process -Name OneDrive -Force -ErrorAction SilentlyContinue
+    Invoke-Command -ComputerName $ComputerName -Credential $cred -ScriptBlock {
+        $ErrorActionPreference = 'Stop'
 
-    # Define registry location
-    $RegPath = "HKCU:\Software\Microsoft\OneDrive"
+        Stop-Process -Name OneDrive -Force -ErrorAction SilentlyContinue
 
-    if (Test-Path $RegPath) {
-        # Export a backup
-        $Backup = "$env:TEMP\OneDrive-registry-backup.reg"
-        reg.exe export "HKCU\Software\Microsoft\OneDrive" $Backup /y
+        $RegPath = 'HKCU:\Software\Microsoft\OneDrive'
 
-        if ($LASTEXITCODE -ne 0) {
-            throw "Registry backup failed. No changes made."
+        if (Test-Path $RegPath) {
+            $Backup = Join-Path $env:TEMP 'OneDrive-registry-backup.reg'
+            reg.exe export 'HKCU\Software\Microsoft\OneDrive' $Backup /y
+            if ($LASTEXITCODE -ne 0) { throw 'Registry backup failed. No changes made.' }
+
+            $NewName = "OneDrive.backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+            Rename-Item -Path $RegPath -NewName $NewName -Force -Confirm:$false -ErrorAction Stop
         }
 
-        # Rename the configuration key
-        $NewName = "OneDrive.backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-        Rename-Item -Path $RegPath -NewName $NewName -ErrorAction Stop
-
-        Write-Host "Registry configuration backed up and renamed" -ForegroundColor Green
-    }
-    else {
-        Write-Host "OneDrive registry key not found" -ForegroundColor Yellow
+        Start-Process 'C:\Program Files\Microsoft OneDrive\OneDrive.exe' -ErrorAction Stop
     }
 
-    # Start OneDrive
-    Start-Process "C:\Program Files\Microsoft OneDrive\OneDrive.exe"
+    Write-Output "SUCCESS: OneDrive registry reset on $ComputerName"
+}
+catch {
+    Write-Output "ERROR: $($_.Exception.Message)"
 }

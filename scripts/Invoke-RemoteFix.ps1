@@ -6,39 +6,31 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $TicketsDir = "$env:USERPROFILE\Documents\tickets"
-$File = "$env:TEMP\remote_fix.ps1"
+$File = Join-Path $env:TEMP 'remote_fix.ps1'
 
-# Prepnutie do tickets\ zabezpečí, že Claude použije vaše lokálne .claude\skills\ a šetrí tokeny
-Push-Location $TicketsDir
 try {
-    Write-Host "Analyzujem a generujem opravu pre $PC..." -ForegroundColor Yellow
-    
-    # Požiadame Claude iba o čistý PowerShell kód bez markdownu a omáčok
-    $Prompt = "Target PC: $PC. Issue: $Issue. Use existing skills if applicable. Output ONLY raw executable PowerShell code without markdown backticks or explanations."
-    claude -p $Prompt | Out-File $File -Encoding utf8
+    $cred = Import-Clixml "$HOME\Documents\admin_cred.xml"
+
+    Push-Location $TicketsDir
+    try {
+        $Prompt = "Target PC: $PC. Issue: $Issue. Use existing skills if applicable. Output ONLY raw executable PowerShell code without markdown backticks, comments or explanations."
+        $Code = (claude -p $Prompt) -join "`n"
+    }
+    finally {
+        Pop-Location
+    }
+
+    $Code = $Code -replace '(?m)^\s*```(powershell|ps1)?\s*$', ''
+    Set-Content -Path $File -Value $Code -Encoding utf8 -Force -Confirm:$false
+
+    if (-not $AutoApprove) {
+        throw "Code saved to $File. Re-run with -AutoApprove to execute it on $PC."
+    }
+
+    $ScriptBlock = [scriptblock]::Create((Get-Content -Path $File -Raw))
+    Invoke-Command -ComputerName $PC -Credential $cred -ScriptBlock $ScriptBlock -ErrorAction Stop
+    Write-Output "SUCCESS: Fix executed on $PC"
 }
-finally {
-    Pop-Location
-}
-
-# Očistenie prípadných markdown značiek
-(Get-Content $File -Raw) -replace '```powershell|```', '' | Set-Content $File -Encoding utf8
-
-Write-Host "`n--- VYGENEROVANÝ KÓD ---" -ForegroundColor Magenta
-Get-Content $File
-Write-Host "------------------------`n" -ForegroundColor Magenta
-
-# Neinteraktívny prepínač vs. manuálne potvrdenie
-if ($AutoApprove) {
-    $Confirm = 'A'
-} else {
-    $Confirm = Read-Host "Spustiť na $PC cez WinRM? (A/N)"
-}
-
-if ($Confirm -match '^[AaYy]$') {
-    $ScriptBlock = [scriptblock]::Create((Get-Content $File -Raw))
-    Invoke-Command -ComputerName $PC -ScriptBlock $ScriptBlock
-    Write-Host "[HOTOVO] Príkaz bol vykonaný na $PC." -ForegroundColor Green
-} else {
-    Write-Host "[ZRUŠENÉ]" -ForegroundColor Red
+catch {
+    Write-Output "ERROR: $($_.Exception.Message)"
 }
